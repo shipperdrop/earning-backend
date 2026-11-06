@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import sqlite3
 import time
@@ -7,7 +8,7 @@ import random
 import string
 from typing import Optional
 
-app = FastAPI(title="Max Earning API")
+app = FastAPI(title="Max Earning API with Admin Panel")
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,6 +19,7 @@ app.add_middleware(
 )
 
 SECRET_APP_TOKEN = "MySuperSecretAppToken123"
+ADMIN_PASSWORD = "MySecretAdminPassword786" # Isey aap apni marzi se change kar sakte hain
 
 def generate_ref_code():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
@@ -39,6 +41,17 @@ def init_db():
             referred_by TEXT
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS withdrawals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            amount INTEGER,
+            method TEXT,
+            account_number TEXT,
+            status TEXT DEFAULT 'Pending',
+            time REAL
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -52,10 +65,12 @@ class Task(BaseModel):
     username: str
     secret_token: str
 
-class MathTask(BaseModel):
+class WithdrawalRequest(BaseModel):
     username: str
     secret_token: str
-    is_correct: bool
+    amount: int
+    method: str
+    account_number: str
 
 @app.post("/create-user/")
 def create_user(user: User):
@@ -92,12 +107,15 @@ def update_balance(username, token, amount, time_col=None, cooldown=0):
     query = f"SELECT balance" + (f", {time_col}" if time_col else "") + " FROM users WHERE username = ?"
     cursor.execute(query, (username,))
     user = cursor.fetchone()
-    if not user: raise HTTPException(status_code=404, detail="User not found")
+    if not user: 
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
     
     current_time = time.time()
     if time_col and current_time - user[1] < cooldown:
         conn.close()
-        raise HTTPException(status_code=429, detail="Task is locked. Please wait!")
+        remaining = int(cooldown - (current_time - user[1]))
+        raise HTTPException(status_code=429, detail=f"Wait {remaining}s before trying again!")
 
     new_balance = user[0] + amount
     if time_col:
@@ -109,52 +127,88 @@ def update_balance(username, token, amount, time_col=None, cooldown=0):
     conn.close()
     return new_balance
 
-# 1. Normal Ad (5s)
 @app.post("/add-points/")
-def add_points(task: Task):
-    bal = update_balance(task.username, task.secret_token, 10, "last_claim_time", 5)
-    return {"message": "10 Coins Added!", "new_balance": bal}
+def add_points(task: Task): return {"message": "10 Coins Added!", "new_balance": update_balance(task.username, task.secret_token, 10, "last_claim_time", 5)}
 
-# 2. Premium Video Ad (30s video) - 30 Coins
 @app.post("/watch-video/")
-def watch_video(task: Task):
-    bal = update_balance(task.username, task.secret_token, 30, "last_video_time", 30)
-    return {"message": "30 Coins Added for Video!", "new_balance": bal}
+def watch_video(task: Task): return {"message": "30 Coins Added!", "new_balance": update_balance(task.username, task.secret_token, 30, "last_video_time", 20)}
 
-# 3. Daily Bonus (24h)
 @app.post("/daily-bonus/")
-def daily_bonus(task: Task):
-    bal = update_balance(task.username, task.secret_token, 50, "last_daily_bonus", 86400)
-    return {"message": "50 Coins Daily Bonus Added!", "new_balance": bal}
+def daily_bonus(task: Task): return {"message": "50 Coins Added!", "new_balance": update_balance(task.username, task.secret_token, 50, "last_daily_bonus", 86400)}
 
-# 4. Spin Wheel (1h)
 @app.post("/spin-wheel/")
 def spin_wheel(task: Task):
     won = random.choice([5, 10, 20, 50])
-    bal = update_balance(task.username, task.secret_token, won, "last_spin_time", 3600)
-    return {"message": f"Wheel stopped at {won} Coins!", "new_balance": bal}
+    return {"message": f"Wheel stopped at {won} Coins!", "new_balance": update_balance(task.username, task.secret_token, won, "last_spin_time", 30)}
 
-# 5. Scratch Card (2h)
 @app.post("/scratch-card/")
 def scratch_card(task: Task):
     won = random.choice([10, 15, 25, 40])
-    bal = update_balance(task.username, task.secret_token, won, "last_scratch_time", 7200)
-    return {"message": f"You scratched {won} Coins!", "new_balance": bal}
+    return {"message": f"You scratched {won} Coins!", "new_balance": update_balance(task.username, task.secret_token, won, "last_scratch_time", 30)}
 
-# 6. Math Quiz (Solve simple math for 5 points, no cooldown)
-@app.post("/solve-math/")
-def solve_math(task: MathTask):
-    if not task.is_correct: raise HTTPException(status_code=400, detail="Wrong Answer!")
-    bal = update_balance(task.username, task.secret_token, 5) # 5 points per correct math
-    return {"message": "Correct Answer! 5 Coins Added.", "new_balance": bal}
+@app.post("/request-withdrawal/")
+def request_withdrawal(req: WithdrawalRequest):
+    if req.secret_token != SECRET_APP_TOKEN: raise HTTPException(status_code=403, detail="Invalid Token")
+    if req.amount < 500: raise HTTPException(status_code=400, detail="Minimum withdrawal is 500 Coins!")
 
-# 7. Offerwall Postback (Advanced - When CPALead sends successful task completion)
-@app.get("/offerwall-webhook")
-def offerwall_postback(username: str, reward: int):
-    # CPALead aapke is URL par hit karega jab user unka task karega
     conn = sqlite3.connect("earning_app.db")
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET balance = balance + ? WHERE username = ?", (reward, username))
+    cursor.execute("SELECT balance FROM users WHERE username = ?", (req.username,))
+    user = cursor.fetchone()
+    
+    if not user or user[0] < req.amount:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Insufficient balance!")
+
+    new_balance = user[0] - req.amount
+    cursor.execute("UPDATE users SET balance = ? WHERE username = ?", (new_balance, req.username))
+    cursor.execute("INSERT INTO withdrawals (username, amount, method, account_number, time) VALUES (?, ?, ?, ?, ?)",
+                   (req.username, req.amount, req.method, req.account_number, time.time()))
     conn.commit()
     conn.close()
-    return {"status": "success"}
+    return {"message": "Withdrawal request submitted successfully!", "new_balance": new_balance}
+
+# --- ADMIN PANEL ---
+@app.get("/admin/dashboard", response_class=HTMLResponse)
+def admin_dashboard(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        return "<h1>Unauthorized! Wrong Password.</h1>"
+    
+    conn = sqlite3.connect("earning_app.db")
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT username, balance, referral_code FROM users")
+    users = cursor.fetchall()
+    
+    cursor.execute("SELECT id, username, amount, method, account_number, status FROM withdrawals")
+    withdrawals = cursor.fetchall()
+    conn.close()
+
+    html = f"""
+    <html>
+    <head>
+        <title>Admin Dashboard</title>
+        <style>
+            body {{ font-family: Arial; padding: 20px; background: #f4f4f4; }}
+            table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; background: white; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #007bff; color: white; }}
+            h2 {{ color: #333; }}
+        </style>
+    </head>
+    <body>
+        <h2>Withdrawal Requests 💸</h2>
+        <table>
+            <tr><th>ID</th><th>User</th><th>Amount</th><th>Method</th><th>Account Number</th><th>Status</th></tr>
+            {''.join(f"<tr><td>{w[0]}</td><td><b>{w[1]}</b></td><td>{w[2]} Coins</td><td>{w[3]}</td><td><b>{w[4]}</b></td><td>{w[5]}</td></tr>" for w in withdrawals)}
+        </table>
+
+        <h2>Registered Users 👥</h2>
+        <table>
+            <tr><th>Username</th><th>Balance</th><th>Invite Code</th></tr>
+            {''.join(f"<tr><td>{u[0]}</td><td>{u[1]} Coins</td><td>{u[2]}</td></tr>" for u in users)}
+        </table>
+    </body>
+    </html>
+    """
+    return html
