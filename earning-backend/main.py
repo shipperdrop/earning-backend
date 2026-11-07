@@ -8,7 +8,7 @@ import random
 import string
 from typing import Optional
 
-app = FastAPI(title="Max Earning API with Admin Panel")
+app = FastAPI(title="Max Earning API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -19,7 +19,7 @@ app.add_middleware(
 )
 
 SECRET_APP_TOKEN = "MySuperSecretAppToken123"
-ADMIN_PASSWORD = "MySecretAdminPassword786" # Isey aap apni marzi se change kar sakte hain
+ADMIN_PASSWORD = "MySecretAdminPassword786" 
 
 def generate_ref_code():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
@@ -27,10 +27,13 @@ def generate_ref_code():
 def init_db():
     conn = sqlite3.connect("earning_app.db")
     cursor = conn.cursor()
+    # Users Table with Email and Phone
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE,
+            email TEXT UNIQUE,
+            phone TEXT UNIQUE,
             balance INTEGER DEFAULT 0,
             last_claim_time REAL DEFAULT 0,
             last_daily_bonus REAL DEFAULT 0,
@@ -41,6 +44,7 @@ def init_db():
             referred_by TEXT
         )
     """)
+    # Withdrawals Table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS withdrawals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,6 +63,8 @@ init_db()
 
 class User(BaseModel):
     username: str
+    email: str
+    phone: str
     referred_by: Optional[str] = None
 
 class Task(BaseModel):
@@ -76,16 +82,24 @@ class WithdrawalRequest(BaseModel):
 def create_user(user: User):
     conn = sqlite3.connect("earning_app.db")
     cursor = conn.cursor()
+    
+    # Check if user already exists (Login logic)
+    cursor.execute("SELECT * FROM users WHERE username = ?", (user.username,))
+    existing_user = cursor.fetchone()
+    if existing_user:
+        conn.close()
+        return {"message": "Logged in successfully!", "balance": existing_user[4]}
+
     ref_code = generate_ref_code()
     try:
-        cursor.execute("INSERT INTO users (username, referral_code, referred_by) VALUES (?, ?, ?)", 
-                       (user.username, ref_code, user.referred_by))
+        cursor.execute("INSERT INTO users (username, email, phone, referral_code, referred_by) VALUES (?, ?, ?, ?, ?)", 
+                       (user.username, user.email, user.phone, ref_code, user.referred_by))
         if user.referred_by:
             cursor.execute("UPDATE users SET balance = balance + 100 WHERE referral_code = ?", (user.referred_by,))
         conn.commit()
-        return {"message": "Account Created!", "balance": 0, "referral_code": ref_code}
+        return {"message": "Account Created Successfully!", "balance": 0, "referral_code": ref_code}
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="Username already exists")
+        raise HTTPException(status_code=400, detail="Email or Phone already in use by another account!")
     finally:
         conn.close()
 
@@ -177,7 +191,7 @@ def admin_dashboard(password: str = ""):
     conn = sqlite3.connect("earning_app.db")
     cursor = conn.cursor()
     
-    cursor.execute("SELECT username, balance, referral_code FROM users")
+    cursor.execute("SELECT username, email, phone, balance, referral_code FROM users")
     users = cursor.fetchall()
     
     cursor.execute("SELECT id, username, amount, method, account_number, status FROM withdrawals")
@@ -197,16 +211,16 @@ def admin_dashboard(password: str = ""):
         </style>
     </head>
     <body>
-        <h2>Withdrawal Requests 💸</h2>
+        <h2>💸 Withdrawal Requests</h2>
         <table>
             <tr><th>ID</th><th>User</th><th>Amount</th><th>Method</th><th>Account Number</th><th>Status</th></tr>
             {''.join(f"<tr><td>{w[0]}</td><td><b>{w[1]}</b></td><td>{w[2]} Coins</td><td>{w[3]}</td><td><b>{w[4]}</b></td><td>{w[5]}</td></tr>" for w in withdrawals)}
         </table>
 
-        <h2>Registered Users 👥</h2>
+        <h2>👥 Registered Users (Accounts)</h2>
         <table>
-            <tr><th>Username</th><th>Balance</th><th>Invite Code</th></tr>
-            {''.join(f"<tr><td>{u[0]}</td><td>{u[1]} Coins</td><td>{u[2]}</td></tr>" for u in users)}
+            <tr><th>Username</th><th>Email</th><th>Phone</th><th>Balance</th><th>Invite Code</th></tr>
+            {''.join(f"<tr><td><b>{u[0]}</b></td><td>{u[1]}</td><td>{u[2]}</td><td>{u[3]} Coins</td><td>{u[4]}</td></tr>" for u in users)}
         </table>
     </body>
     </html>
